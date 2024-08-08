@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/biter777/countries"
-	cloudflare "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/viper"
 )
@@ -54,6 +57,15 @@ const (
 	logpushFailedJobsZoneMetricName              MetricName = "cloudflare_logpush_failed_jobs_zone_count"
 	r2StorageMetricName                          MetricName = "cloudflare_r2_storage_bytes"
 	r2OperationMetricName                        MetricName = "cloudflare_r2_operation_count"
+	d1SizeMetricName                             MetricName = "cloudflare_d1_size_bytes"
+	d1ReadQueriesMetricName                      MetricName = "cloudflare_d1_read_queries_count"
+	d1WriteQueriesMetricName                     MetricName = "cloudflare_d1_write_queries_count"
+	d1RowsReadMetricName                         MetricName = "cloudflare_d1_rows_read_count"
+	d1RowsWrittenMetricName                      MetricName = "cloudflare_d1_rows_written_count"
+	d1QueryBatchTimeP50MetricName                MetricName = "cloudflare_d1_query_batch_time_p50"
+	d1QueryBatchTimeP90MetricName                MetricName = "cloudflare_d1_query_batch_time_p90"
+	d1QueryBatchResponseBytesP50MetricName       MetricName = "cloudflare_d1_query_batch_response_p50_bytes"
+	d1QueryBatchResponseBytesP90MetricName       MetricName = "cloudflare_d1_query_batch_response_p90_bytes"
 )
 
 type MetricsSet map[MetricName]struct{}
@@ -280,6 +292,51 @@ var (
 		Name: r2OperationMetricName.String(),
 		Help: "Number of operations performed by R2",
 	}, []string{"account", "bucket", "operation"})
+
+	d1Storage = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1SizeMetricName.String(),
+		Help: "Storage used by D1",
+	}, []string{"account", "database"})
+
+	d1ReadQueries = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1ReadQueriesMetricName.String(),
+		Help: "Number of read queries performed by D1",
+	}, []string{"account", "database"})
+
+	d1WriteQueries = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1WriteQueriesMetricName.String(),
+		Help: "Number of write queries performed by D1",
+	}, []string{"account", "database"})
+
+	d1RowsRead = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1RowsReadMetricName.String(),
+		Help: "Number of rows read by D1",
+	}, []string{"account", "database"})
+
+	d1RowsWritten = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1RowsWrittenMetricName.String(),
+		Help: "Number of rows written by D1",
+	}, []string{"account", "database"})
+
+	d1QueryBatchTimeP50 = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1QueryBatchTimeP50MetricName.String(),
+		Help: "Query batch response time in milliseconds (50th percentile).",
+	}, []string{"account", "database"})
+
+	d1QueryBatchTimeP90 = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1QueryBatchTimeP90MetricName.String(),
+		Help: "Query batch response time in milliseconds (90th percentile).",
+	}, []string{"account", "database"})
+
+	d1QueryBatchResponseBytesP50 = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1QueryBatchResponseBytesP50MetricName.String(),
+		Help: "The total number of bytes in the response, including all returned rows and metadata (50th percentile).",
+	}, []string{"account", "database"})
+
+	d1QueryBatchResponseBytesP90 = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: d1QueryBatchResponseBytesP90MetricName.String(),
+		Help: "The total number of bytes in the response, including all returned rows and metadata (90th percentile).",
+	}, []string{"account", "database"})
 )
 
 func buildAllMetricsSet() MetricsSet {
@@ -318,6 +375,15 @@ func buildAllMetricsSet() MetricsSet {
 	allMetricsSet.Add(logpushFailedJobsZoneMetricName)
 	allMetricsSet.Add(r2OperationMetricName)
 	allMetricsSet.Add(r2StorageMetricName)
+	allMetricsSet.Add(d1SizeMetricName)
+	allMetricsSet.Add(d1ReadQueriesMetricName)
+	allMetricsSet.Add(d1WriteQueriesMetricName)
+	allMetricsSet.Add(d1RowsReadMetricName)
+	allMetricsSet.Add(d1RowsWrittenMetricName)
+	allMetricsSet.Add(d1QueryBatchTimeP50MetricName)
+	allMetricsSet.Add(d1QueryBatchTimeP90MetricName)
+	allMetricsSet.Add(d1QueryBatchResponseBytesP50MetricName)
+	allMetricsSet.Add(d1QueryBatchResponseBytesP90MetricName)
 	return allMetricsSet
 }
 
@@ -437,8 +503,32 @@ func mustRegisterMetrics(deniedMetrics MetricsSet) {
 	if !deniedMetrics.Has(r2OperationMetricName) {
 		prometheus.MustRegister(r2Operation)
 	}
-	if !deniedMetrics.Has(buildInfoMetricName) {
-		prometheus.MustRegister(buildInfo)
+	if !deniedMetrics.Has(d1SizeMetricName) {
+		prometheus.MustRegister(d1Storage)
+	}
+	if !deniedMetrics.Has(d1ReadQueriesMetricName) {
+		prometheus.MustRegister(d1ReadQueries)
+	}
+	if !deniedMetrics.Has(d1WriteQueriesMetricName) {
+		prometheus.MustRegister(d1WriteQueries)
+	}
+	if !deniedMetrics.Has(d1RowsReadMetricName) {
+		prometheus.MustRegister(d1RowsRead)
+	}
+	if !deniedMetrics.Has(d1RowsWrittenMetricName) {
+		prometheus.MustRegister(d1RowsWritten)
+	}
+	if !deniedMetrics.Has(d1QueryBatchTimeP50MetricName) {
+		prometheus.MustRegister(d1QueryBatchTimeP50)
+	}
+	if !deniedMetrics.Has(d1QueryBatchTimeP90MetricName) {
+		prometheus.MustRegister(d1QueryBatchTimeP90)
+	}
+	if !deniedMetrics.Has(d1QueryBatchResponseBytesP50MetricName) {
+		prometheus.MustRegister(d1QueryBatchResponseBytesP50)
+	}
+	if !deniedMetrics.Has(d1QueryBatchResponseBytesP90MetricName) {
+		prometheus.MustRegister(d1QueryBatchResponseBytesP90)
 	}
 }
 
@@ -507,12 +597,69 @@ func fetchR2StorageForAccount(account cloudflare.Account, wg *sync.WaitGroup) {
 	if err != nil {
 		return
 	}
+	//accountName := strings.ToLower(strings.ReplaceAll(account.Name, " ", "-"))
 	for _, acc := range r.Viewer.Accounts {
 		for _, bucket := range acc.R2StorageGroups {
 			r2Storage.With(prometheus.Labels{"account": account.Name, "bucket": bucket.Dimensions.BucketName}).Set(float64(bucket.Max.PayloadSize))
 		}
 		for _, operation := range acc.R2StorageOperations {
 			r2Operation.With(prometheus.Labels{"account": account.Name, "bucket": operation.Dimensions.BucketName, "operation": operation.Dimensions.Action}).Set(float64(operation.Sum.Requests))
+		}
+	}
+}
+
+func fetchD1StorageForAccount(account cloudflare.Account, wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer wg.Done()
+
+	r, err := fetchD1Account(account.ID)
+
+	if err != nil {
+		return
+	}
+	accountName := strings.ToLower(strings.ReplaceAll(account.Name, " ", "-"))
+
+	for _, acc := range r.Viewer.Accounts {
+		for _, database := range acc.D1StorageAdaptiveGroups {
+			if d1IDToName[database.Dimensions.DatabaseID] == "" && viper.GetBool("d1-use-names") {
+				db, getDBErr := cloudflareAPI.GetD1Database(context.Background(), cloudflare.AccountIdentifier(account.ID), database.Dimensions.DatabaseID)
+				if getDBErr != nil {
+					log.Errorf("Error fetching D1 database name: %v", getDBErr)
+					continue
+				}
+				d1IDToName[database.Dimensions.DatabaseID] = db.Name
+			}
+			label := ""
+			if viper.GetBool("d1-use-names") {
+				label = d1IDToName[database.Dimensions.DatabaseID]
+			} else {
+				label = database.Dimensions.DatabaseID
+			}
+			d1Storage.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Max.DatabaseSizeBytes))
+		}
+		for _, database := range acc.D1AnalyticsAdaptiveGroups {
+			if d1IDToName[database.Dimensions.DatabaseID] == "" && viper.GetBool("d1-use-names") {
+				db, getDBErr := cloudflareAPI.GetD1Database(context.Background(), cloudflare.AccountIdentifier(account.ID), database.Dimensions.DatabaseID)
+				if getDBErr != nil {
+					log.Errorf("Error fetching D1 database name: %v", getDBErr)
+					continue
+				}
+				d1IDToName[database.Dimensions.DatabaseID] = db.Name
+			}
+			label := ""
+			if viper.GetBool("d1-use-names") {
+				label = d1IDToName[database.Dimensions.DatabaseID]
+			} else {
+				label = database.Dimensions.DatabaseID
+			}
+			d1ReadQueries.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Sum.ReadQueries))
+			d1WriteQueries.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Sum.WriteQueries))
+			d1RowsRead.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Sum.RowsRead))
+			d1RowsWritten.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Sum.RowsWritten))
+			d1QueryBatchTimeP50.With(prometheus.Labels{"account": accountName, "database": label}).Set(database.Quantiles.QueryBatchTimeMsP50)
+			d1QueryBatchTimeP90.With(prometheus.Labels{"account": accountName, "database": label}).Set(database.Quantiles.QueryBatchTimeMsP90)
+			d1QueryBatchResponseBytesP50.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Quantiles.QueryBatchResponseBytesP50))
+			d1QueryBatchResponseBytesP90.With(prometheus.Labels{"account": accountName, "database": label}).Set(float64(database.Quantiles.QueryBatchResponseBytesP90))
 		}
 	}
 }

@@ -17,6 +17,7 @@ const (
 
 var (
 	graphqlClient *graphql.Client
+	d1IDToName    = map[string]string{}
 )
 
 type cloudflareResponse struct {
@@ -75,6 +76,41 @@ type r2AccountResp struct {
 type cloudflareResponseR2Account struct {
 	Viewer struct {
 		Accounts []r2AccountResp `json:"accounts"`
+	}
+}
+
+type d1AccountResp struct {
+	D1AnalyticsAdaptiveGroups []struct {
+		Dimensions struct {
+			DatabaseID string `json:"databaseId"`
+		} `json:"dimensions"`
+		Quantiles struct {
+			QueryBatchResponseBytesP50 int     `json:"queryBatchResponseBytesP50"`
+			QueryBatchResponseBytesP90 int     `json:"queryBatchResponseBytesP90"`
+			QueryBatchTimeMsP50        float64 `json:"queryBatchTimeMsP50"`
+			QueryBatchTimeMsP90        float64 `json:"queryBatchTimeMsP90"`
+		} `json:"quantiles"`
+		Sum struct {
+			QueryBatchResponseBytes int `json:"queryBatchResponseBytes"`
+			ReadQueries             int `json:"readQueries"`
+			RowsRead                int `json:"rowsRead"`
+			RowsWritten             int `json:"rowsWritten"`
+			WriteQueries            int `json:"writeQueries"`
+		} `json:"sum"`
+	} `json:"d1AnalyticsAdaptiveGroups"`
+	D1StorageAdaptiveGroups []struct {
+		Dimensions struct {
+			DatabaseID string `json:"databaseId"`
+		} `json:"dimensions"`
+		Max struct {
+			DatabaseSizeBytes int `json:"databaseSizeBytes"`
+		} `json:"max"`
+	} `json:"d1StorageAdaptiveGroups"`
+}
+
+type cloudflareResponseD1Account struct {
+	Viewer struct {
+		Accounts []d1AccountResp `json:"accounts"`
 	}
 }
 
@@ -803,6 +839,72 @@ func fetchR2Account(accountID string) (*cloudflareResponseR2Account, error) {
 	var resp cloudflareResponseR2Account
 	if err := graphqlClient.Run(ctx, request, &resp); err != nil {
 		log.Errorf("Error fetching R2 account: %s", err)
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func fetchD1Account(accountID string) (*cloudflareResponseD1Account, error) {
+	now := time.Now().Add(-time.Duration(viper.GetInt("scrape_delay")) * time.Second).UTC()
+	s := 60 * time.Second
+	now = now.Truncate(s)
+
+	request := graphql.NewRequest(`query($accountID: String!, $limit: Int!, $date: String!,) {
+		    viewer {
+        accounts(filter: { accountTag: $accountID }) {
+            d1AnalyticsAdaptiveGroups(filter: {
+				date: $date
+			  }
+			  limit: $limit) {
+                dimensions {
+                    databaseId
+                }
+                quantiles {
+                    queryBatchResponseBytesP50
+                    queryBatchResponseBytesP90
+                    queryBatchTimeMsP50
+                    queryBatchTimeMsP90
+                }
+                sum {
+                    queryBatchResponseBytes
+                    readQueries
+                    rowsRead
+                    rowsWritten
+                    writeQueries
+                }
+            }
+            d1StorageAdaptiveGroups(filter: {
+				date: $date
+			  }
+			  limit: $limit
+			) {
+                max {
+                    databaseSizeBytes
+                }
+                dimensions {
+                    databaseId
+                    date
+                }
+            }
+        }
+    }
+	  }`)
+
+	if len(viper.GetString("cf_api_token")) > 0 {
+		request.Header.Set("Authorization", "Bearer "+viper.GetString("cf_api_token"))
+	} else {
+		request.Header.Set("X-AUTH-EMAIL", viper.GetString("cf_api_email"))
+		request.Header.Set("X-AUTH-KEY", viper.GetString("cf_api_key"))
+	}
+
+	request.Var("accountID", accountID)
+	request.Var("limit", 9999)
+	request.Var("date", now.Format("2006-01-02"))
+
+	ctx := context.Background()
+	var resp cloudflareResponseD1Account
+	if err := graphqlClient.Run(ctx, request, &resp); err != nil {
+		log.Errorf("Error fetching D1 account: %s", err)
 		return nil, err
 	}
 	return &resp, nil
