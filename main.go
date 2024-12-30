@@ -106,6 +106,7 @@ func fetchMetrics() {
 		go fetchWorkerAnalytics(a, &wg)
 		go fetchLogpushAnalyticsForAccount(a, &wg)
 		go fetchR2StorageForAccount(a, &wg)
+		go fetchD1StorageForAccount(a, &wg)
 	}
 
 	// Make requests in groups of cfgBatchSize to avoid rate limit
@@ -149,8 +150,10 @@ func runExporter() {
 
 	if len(viper.GetString("cf_api_token")) > 0 {
 		cloudflareAPI, err = cloudflare.NewWithAPIToken(viper.GetString("cf_api_token"))
+		log.Debug("Using API Token")
 	} else {
 		cloudflareAPI, err = cloudflare.New(viper.GetString("cf_api_key"), viper.GetString("cf_api_email"))
+		log.Warn("Using API Key and Email. Consider using API Token instead.")
 	}
 	if err != nil {
 		log.Fatalf("Error creating Cloudflare API client: %s", err)
@@ -159,9 +162,9 @@ func runExporter() {
 	graphqlClient = graphql.NewClient(cfGraphQLEndpoint)
 
 	if len(viper.GetString("cf_api_token")) > 0 {
-		status, err := cloudflareAPI.VerifyAPIToken(context.Background())
-		if err != nil {
-			log.Fatalf("Error creating Cloudflare API client: %s", err)
+		status, verifyErr := cloudflareAPI.VerifyAPIToken(context.Background())
+		if verifyErr != nil {
+			log.Fatalf("Error verifying API client: %s", verifyErr)
 		}
 		log.Debugf("API Token status: %s", status.Status)
 	}
@@ -182,7 +185,7 @@ func runExporter() {
 			go fetchMetrics()
 		}
 	}()
-	goVersion := ""
+	goVersion := "unknown"
 	if goBuildInfo, available := debug.ReadBuildInfo(); available {
 		goVersion = goBuildInfo.GoVersion
 	}
@@ -272,6 +275,10 @@ func main() {
 	flags.String("log_level", "info", "log level")
 	viper.BindEnv("log_level")
 	viper.SetDefault("log_level", "info")
+
+	flags.Bool("d1-use-names", false, "use names instead of IDs for D1 storage. Requires D1:Read permission")
+	viper.BindEnv("d1-use-names")
+	viper.SetDefault("d1-use-names", false)
 
 	viper.BindPFlags(flags)
 	cmd.Execute()
